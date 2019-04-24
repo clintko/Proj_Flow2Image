@@ -546,104 +546,7 @@ class Transform_Density(BaseEstimator, TransformerMixin):
         lst_img  = np.array(lst_img)
         dat_copy.set_image(lst_img)
         return dat_copy
-    
-#####################################################################################        
-def leave_one_out_split(dat, k, n_samples, n_subsamples):
-    """divide the data into two parts"""
-    ### the samples index after subsampling    
-    idx_samples = np.array([[idx] * n_subsamples for idx in range(n_samples)])
-    idx_samples = idx_samples.ravel()
-
-    ### get the overall index for train and validation
-    idx_trn = np.where(idx_samples != k)[0]
-    idx_val = np.where(idx_samples == k)[0]
-    
-    ### for each label, get the index for train and validation
-    idx_trn = np.concatenate([
-        dat.which_label(label)[idx_trn] 
-        for label in dat.unique_label()
-    ])
         
-    idx_val = np.concatenate([
-        dat.which_label(label)[idx_val] 
-        for label in dat.unique_label()
-    ])
-        
-    ### split matrix
-    mat_trn = dat.get_matrix_original()[idx_trn]
-    mat_val = dat.get_matrix_original()[idx_val]
-    
-    ### split labels
-    lab_trn = dat.label[idx_trn]
-    lab_val = dat.label[idx_val]
-        
-    ### get_coord_original()
-    n_sample = dat.get_num_sample()
-    coord = np.array([dat.get_coord(idx) for idx in range(n_sample)])
-    
-    ### split coordinates
-    coord_trn = np.concatenate(coord[idx_trn])
-    coord_val = np.concatenate(coord[idx_val])
-       
-    ### split images   
-    img_trn = dat.img[idx_trn]
-    img_val = dat.img[idx_val]
-        
-    ### wrap the train and validation data      
-    wrap_trn = Data_Wrapper(mat_trn, lab_trn, coord=coord_trn, image=img_trn)
-    wrap_val = Data_Wrapper(mat_val, lab_val, coord=coord_val, image=img_val)
-    return (wrap_trn, wrap_val)    
-
-#####################################################################################        
-def train_test_split_datawrapper(dat, n_train, n_subsample):
-        """divide the data into two parts"""
-        ### index for train and test
-        #n_train = np.ceil(n_sample * 0.8).astype(int) # 11 -> 9
-        n_train *= n_subsample                        # 9  -> 90
-        for label in dat.unique_label():
-            idx = dat.which_label(label) 
-            assert n_train < len(idx)
-        
-        ids_train = np.concatenate([
-            dat.which_label(label)[:n_train] 
-            for label in dat.unique_label()
-        ])
-        
-        ids_test  = np.concatenate([
-            dat.which_label(label)[n_train:] 
-            for label in dat.unique_label()
-        ])
-        
-        ### split matrix, label, coordinates, image
-        mat_train = dat.get_matrix_original()[ids_train]
-        mat_test  = dat.get_matrix_original()[ids_test]
-        
-        lab_train = dat.label[ids_train]
-        lab_test  = dat.label[ids_test]
-        
-        if dat.coord is not None:
-            ### get_coord_original()
-            n_sample = dat.get_num_sample()
-            coord = np.array([dat.get_coord(idx) for idx in range(n_sample)])
-            ### split
-            coord_train = np.concatenate(coord[ids_train])
-            coord_test  = np.concatenate(coord[ids_test])
-        else:
-            coord_train = None
-            coord_test  = None
-        
-        if dat.img is not None:
-            img = dat.img
-            img_train = img[ids_train]
-            img_test  = img[ids_test]
-        else:
-            img_train = None
-            img_test  = None
-        
-        wrap_train = Data_Wrapper(mat_train, lab_train, coord=coord_train, image=img_train)
-        wrap_test  = Data_Wrapper(mat_test, lab_test, coord=coord_test, image=img_test)
-        return (wrap_train, wrap_test)
-    
 #####################################################################################
 class Classify_PCA_LogReg(BaseEstimator, ClassifierMixin):
     """Class: Classify_PCA_LogReg
@@ -733,51 +636,91 @@ class Classify_PCA_LogReg(BaseEstimator, ClassifierMixin):
                 "predicted_score": y_new_score}
 
 #####################################################################################
-class Classify_CNN(BaseEstimator, TransformerMixin):
+class Classify_CNN(BaseEstimator, ClassifierMixin):
     """comment"""
     
-    def __init__(self, dat):
+    def __init__(self, dat, fun_get_cnn, learn_rate = 5e-6):
         ### initialization
-        ngrid       = dat.ngrid
-        lst_img     = dat.img
-        num_classes = len(dat.count_label())
-        num_sample  = dat.get_num_sample()
-        num_feature = dat.get_num_variable()
+        img       = dat.img
+        n_grid    = dat.ngrid
+        n_sample  = dat.get_num_sample()
+        n_feature = dat.get_num_variable()
+        n_class   = len(dat.unique_label())
         
         ### check dimension
-        assert(lst_img.shape[0] == num_sample)
-        assert(lst_img.shape[1] == ngrid**2)
+        input_shape = (n_grid, n_grid, n_feature)
+        assert(img.shape[0] == n_sample)
+        assert(img.shape[1] == n_grid**2)
+        assert(img.shape[2] == n_feature)
         
-        ### store the shape
-        self.input_shape = (ngrid, ngrid, num_feature)
-        self.ngrid = ngrid
+        ### store the info
+        self.input_shape = input_shape
+        self.cnn_model = fun_get_cnn(input_shape, n_class, lr = learn_rate)
         
-    def fit(self, dat, y = None, epochs = 20, batch_size = 4, test_size = 0.3, verbose = 1, random_state = 123):         
+    def fit(self, dat_trn, y = None, dat_tst = None, epochs = 20, batch_size = 4, verbose = 1, random_state = 123):         
         ### initialization
-        ngrid = self.ngrid
-        img   = dat.img.copy()
-        num_sample  = dat.get_num_sample()
-        num_feature = dat.get_num_variable()
-        y = to_categorical(dat.label)
-        X = img.reshape(num_sample, ngrid, ngrid, num_feature)
+        model       = self.cnn_model
+        input_shape = self.input_shape
+        ngrid       = input_shape[0]
+        n_feature   = input_shape[-1]
         
-        x_train, x_test, y_train, y_test = train_test_split(
-            X, y, 
-            test_size    = test_size, 
-            random_state = random_state)
+        ### train
+        x_trn = dat_trn.img.copy()
+        x_trn = x_trn.reshape(-1, ngrid, ngrid, n_feature)
+        y_trn = dat_trn.label.copy()
+        y_trn = to_categorical(y_trn)
+        
+        ### test
+        if dat_tst is not None:
+            x_tst = dat_tst.img.copy()
+            x_tst = x_tst.reshape(-1, ngrid, ngrid, n_feature)
+            
+            y_tst = dat_tst.label.copy()
+            y_tst = to_categorical(y_tst)
         
         ### fit the model
-        self.history = self.model.fit(
-            x_train, y_train,
-            batch_size = batch_size,
-            epochs     = epochs,
-            verbose    = verbose,
-            validation_data = (x_test, y_test))
+        if dat_tst is not None:
+            self.history = self.cnn_model.fit(
+                x_trn, y_trn,
+                batch_size = batch_size,
+                epochs     = epochs,
+                verbose    = verbose,
+                validation_data = (x_tst, y_tst))
+        else:
+            self.history = self.model.fit(
+                x_trn, y_trn,
+                batch_size = batch_size,
+                epochs     = epochs,
+                verbose    = verbose)
         
         return self
 
-    def transform(self):
-        return self
+    def predict(self, dat_new, y=None):
+        ### check the dimension
+        input_shape = self.input_shape
+        ngrid       = input_shape[0]
+        n_feature   = input_shape[-1]
+        
+        ### data X
+        x_new = dat_new.img.copy()
+        x_new = x_new.reshape(-1, ngrid, ngrid, n_feature)
+            
+        ### label y
+        if y is None:
+            y_new = dat_new.label.copy()
+            y_new = to_categorical(y_new)
+        else:
+            y_new = y
+        
+        ### predict class and calcualte accuracy
+        y_new_pred  = self.model.predict(X_new_red)
+        y_new_prob  = self.model.predict_proba(X_new_red)
+        y_new_score = self.model.decision_function(X_new_red)
+        acc = accuracy_score(y_new, y_new_pred)
+        
+        ### output results
+        return {"acc":             acc, 
+                "predicted_class": y_new_pred,
+                "predicted_prob":  y_new_prob,
+                "predicted_score": y_new_score}
     
-    def set_model(self, cnn_model):
-        self.model = cnn_model
